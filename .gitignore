@@ -1,0 +1,33 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# App-spezifische Daten
+App-State/
+DMS-Root/
+Input/
+*.sqlite3
+*.db
+
+# Environment
+.env
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+.codellm/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
