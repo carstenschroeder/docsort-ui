@@ -694,10 +694,10 @@ INDEX_TMPL = r"""
     .stat-dot.processing { background: var(--warning); }
     .stat-dot.error { background: var(--error); }
     .stat-dot.moved { background: var(--gray-400); }
-    .queue { 
-      display: grid; 
-      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); 
-      gap: 16px; 
+    .queue {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
     }
     .card { 
       background: white;
@@ -1341,7 +1341,7 @@ def render_folder_tree_html(tree: Dict[str, Any]) -> str:
         label_inner = f'<span class="folder-node folder" {target_attr}><b>{name}</b></span>' if rel else f'<span class="muted"><b>{name}</b></span>'
 
         if not children:
-            return f'<div class="folder-node folder" {target_attr}><b>{name}</b></div>' if rel else f'<div class="muted"><b>{name}</b></div>'
+            return f'<div class="folder-node folder" style="display: block; margin-left: 16px" {target_attr}><b>{name}</b></div>' if rel else f'<div class="muted" style="display: block"><b>{name}</b></div>'
 
         inner = "\n".join(rec(c) for c in children)
         open_attr = "open" if is_root else ""
@@ -1422,16 +1422,7 @@ def api_queue():
         rows = conn.execute("""
             SELECT id, input_path, status, suggestions_json
             FROM documents
-            ORDER BY
-              CASE status
-                WHEN 'READY' THEN 0
-                WHEN 'ERROR' THEN 1
-                WHEN 'PROCESSING' THEN 2
-                WHEN 'NEW' THEN 3
-                WHEN 'MOVED' THEN 4
-                ELSE 5
-              END,
-              id DESC
+            ORDER BY input_path ASC
             LIMIT 200
         """).fetchall()
 
