@@ -1,0 +1,75 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Doc {{ doc.id }} - DocSort</title>
+  <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+  <div class="container">
+    <a href="/" class="back-link">← Back to Queue</a>
+    
+    <div class="header">
+      <div>
+        <div class="doc-title">{{ doc.name }}</div>
+        <span class="tag tag-{{ doc.status | lower }}">{{ doc.status }}</span>
+      </div>
+    </div>
+
+    <div class="meta-grid">
+      <div class="meta-item">
+        <div class="meta-label">Input Path</div>
+        <div class="meta-value">{{ doc.input_path }}</div>
+      </div>
+      {% if doc.moved_path %}
+      <div class="meta-item">
+        <div class="meta-label">Moved To</div>
+        <div class="meta-value">{{ doc.moved_path }}</div>
+      </div>
+      {% endif %}
+    </div>
+
+    {% if doc.error %}
+    <div class="box error-box">
+      <div class="box-title">⚠ Error</div>
+      <div class="muted">{{ doc.error }}</div>
+      <button class="btn btn-error" style="margin-top: 16px" onclick="retry({{ doc.id }})">Retry Processing</button>
+    </div>
+    {% endif %}
+
+    <div class="box">
+      <div class="box-title">📁 Folder Suggestions</div>
+      {% if doc.suggestions %}
+        <table>
+          <thead>
+            <tr><th>#</th><th>Folder</th><th>Score</th><th>Action</th></tr>
+          </thead>
+          <tbody>
+            {% for s in doc.suggestions %}
+            <tr>
+              <td>{{ loop.index }}</td>
+              <td><code>{{ s.folder_rel }}</code></td>
+              <td><span class="score-badge">{{ s.score }}</span></td>
+              <td><button class="btn btn-primary" onclick="assign('{{ s.folder_rel | e }}', {{ doc.id }})">Move Here</button></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="muted">No suggestions available yet. Folder profiles may need to be generated.</div>
+      {% endif %}
+    </div>
+
+    <div class="box">
+      <div class="box-title">📄 Extracted Content</div>
+      <div class="keywords">
+        {% for w in keywords %}<span class="keyword">{{ w }}</span>{% endfor %}
+      </div>
+      <pre>{{ preview_text }}</pre>
+    </div>
+  </div>
+
+<script src="/static/js/doc.js"></script>
+</body>
+</html>

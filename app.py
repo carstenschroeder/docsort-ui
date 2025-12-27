@@ -16,7 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
-from jinja2 import Environment, BaseLoader
+from fastapi.staticfiles import StaticFiles
+from jinja2 import Environment, FileSystemLoader
 
 # =========================
 # Config
@@ -1336,7 +1337,7 @@ async function retry() {
 </html>
 """
 
-env = Environment(loader=BaseLoader(), autoescape=True)
+env = Environment(loader=FileSystemLoader('templates'), autoescape=True)
 
 def render_folder_tree_html(tree: Dict[str, Any]) -> str:
     def rec(node: Dict[str, Any], is_root: bool = False) -> str:
@@ -1384,11 +1385,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="DocSort Review UI", lifespan=lifespan)
 
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     tree = build_tree(cfg.ROOT_DIR)
     folder_tree_html = render_folder_tree_html(tree)
-    tmpl = env.from_string(INDEX_TMPL)
+    tmpl = env.get_template('index.html')
     html_out = tmpl.render(folder_tree_html=folder_tree_html, root_dir=str(cfg.ROOT_DIR))
     return HTMLResponse(html_out)
 
@@ -1404,7 +1407,7 @@ def doc_detail(doc_id: int):
     keywords = top_keywords(extracted, k=12) if extracted else []
     preview_text = extracted[:120000] if extracted else "(no extracted text yet)"
 
-    tmpl = env.from_string(DOC_TMPL)
+    tmpl = env.get_template('doc.html')
     html_out = tmpl.render(
         doc={
             "id": int(r["id"]),
