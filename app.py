@@ -4,12 +4,12 @@ import json
 import time
 import math
 import html
-import queue
 import shutil
 import sqlite3
 import threading
+from contextlib import contextmanager, asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -70,58 +70,60 @@ DB_PATH = cfg.STATE_DIR / "state.sqlite3"
 DB_LOCK = threading.Lock()
 
 def now_iso() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
+@contextmanager
 def db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 def init_db():
     with DB_LOCK:
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS documents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            input_path TEXT NOT NULL,
-            sha256 TEXT,
-            status TEXT NOT NULL,
-            extracted_md_path TEXT,
-            embedding_json TEXT,
-            suggestions_json TEXT,
-            suggested_folder_rel TEXT,
-            chosen_folder_rel TEXT,
-            moved_path TEXT,
-            error TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-        """)
-        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_input_path ON documents(input_path)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status)")
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS folder_profiles (
-            folder_rel TEXT PRIMARY KEY,
-            n INTEGER NOT NULL,
-            centroid_json TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-        """)
-        conn.commit()
-        conn.close()
+        with db() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                input_path TEXT NOT NULL,
+                sha256 TEXT,
+                status TEXT NOT NULL,
+                extracted_md_path TEXT,
+                embedding_json TEXT,
+                suggestions_json TEXT,
+                suggested_folder_rel TEXT,
+                chosen_folder_rel TEXT,
+                moved_path TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """)
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_input_path ON documents(input_path)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status)")
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS folder_profiles (
+                folder_rel TEXT PRIMARY KEY,
+                n INTEGER NOT NULL,
+                centroid_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """)
+            conn.commit()
 
 def reset_stuck_processing():
     """Reset documents stuck in PROCESSING status back to NEW on startup."""
     with DB_LOCK:
-        conn = db()
-        conn.execute("""
-            UPDATE documents
-            SET status='NEW', updated_at=?
-            WHERE status='PROCESSING'
-        """, (now_iso(),))
-        conn.commit()
-        conn.close()
+        with db() as conn:
+            conn.execute("""
+                UPDATE documents
+                SET status='NEW', updated_at=?
+                WHERE status='PROCESSING'
+            """, (now_iso(),))
+            conn.commit()
 
 # =========================
 # Folder tree utilities
@@ -155,7 +157,7 @@ def build_tree(root_dir: Path) -> Dict[str, Any]:
         children = [p for p in d.iterdir() if p.is_dir() and not p.name.startswith(".")]
         children.sort(key=lambda x: x.name.lower())
         return {
-            "name": d.name if rel != "." else d.name,
+            "name": d.name,
             "rel": "" if rel == "." else rel,
             "children": [node_for_dir(c) for c in children],
         }
@@ -254,9 +256,8 @@ def docling_extract_md_and_text(file_path: Path) -> Tuple[str, str, Dict[str, An
 
 def load_folder_profiles() -> Dict[str, Tuple[int, List[float]]]:
     with DB_LOCK:
-        conn = db()
-        rows = conn.execute("SELECT folder_rel, n, centroid_json FROM folder_profiles").fetchall()
-        conn.close()
+        with db() as conn:
+            rows = conn.execute("SELECT folder_rel, n, centroid_json FROM folder_profiles").fetchall()
     out: Dict[str, Tuple[int, List[float]]] = {}
     for r in rows:
         out[r["folder_rel"]] = (int(r["n"]), json.loads(r["centroid_json"]))
@@ -264,17 +265,16 @@ def load_folder_profiles() -> Dict[str, Tuple[int, List[float]]]:
 
 def upsert_folder_profile(folder_rel: str, centroid: List[float], n: int):
     with DB_LOCK:
-        conn = db()
-        conn.execute("""
-            INSERT INTO folder_profiles(folder_rel, n, centroid_json, updated_at)
-            VALUES(?, ?, ?, ?)
-            ON CONFLICT(folder_rel) DO UPDATE SET
-                n=excluded.n,
-                centroid_json=excluded.centroid_json,
-                updated_at=excluded.updated_at
-        """, (folder_rel, int(n), json.dumps(centroid), now_iso()))
-        conn.commit()
-        conn.close()
+        with db() as conn:
+            conn.execute("""
+                INSERT INTO folder_profiles(folder_rel, n, centroid_json, updated_at)
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(folder_rel) DO UPDATE SET
+                    n=excluded.n,
+                    centroid_json=excluded.centroid_json,
+                    updated_at=excluded.updated_at
+            """, (folder_rel, int(n), json.dumps(centroid), now_iso()))
+            conn.commit()
 
 def seed_profiles_from_folder_names():
     """
@@ -354,56 +354,57 @@ def enqueue_new_files():
             continue
 
         with DB_LOCK:
-            conn = db()
-            row = conn.execute("SELECT id, status FROM documents WHERE input_path=?", (str(p),)).fetchone()
-            if row is None:
-                conn.execute("""
-                    INSERT INTO documents(input_path, status, created_at, updated_at)
-                    VALUES(?, 'NEW', ?, ?)
-                """, (str(p), now_iso(), now_iso()))
-            elif row["status"] == "MOVED":
-                conn.execute("""
-                    UPDATE documents SET status='NEW', moved_path=NULL, chosen_folder_rel=NULL, updated_at=?
-                    WHERE id=?
-                """, (now_iso(), row["id"]))
-            conn.commit()
-            conn.close()
+            with db() as conn:
+                row = conn.execute("SELECT id, status FROM documents WHERE input_path=?", (str(p),)).fetchone()
+                if row is None:
+                    conn.execute("""
+                        INSERT INTO documents(input_path, status, created_at, updated_at)
+                        VALUES(?, 'NEW', ?, ?)
+                    """, (str(p), now_iso(), now_iso()))
+                elif row["status"] == "MOVED":
+                    conn.execute("""
+                        UPDATE documents SET status='NEW', moved_path=NULL, chosen_folder_rel=NULL, updated_at=?
+                        WHERE id=?
+                    """, (now_iso(), row["id"]))
+                conn.commit()
 
 def pick_one_for_processing() -> Optional[int]:
     with DB_LOCK:
-        conn = db()
-        row = conn.execute("""
-            SELECT id FROM documents
-            WHERE status='NEW'
-            ORDER BY id ASC
-            LIMIT 1
-        """).fetchone()
-        if not row:
-            conn.close()
-            return None
-        doc_id = int(row["id"])
-        conn.execute("UPDATE documents SET status='PROCESSING', updated_at=? WHERE id=?", (now_iso(), doc_id))
-        conn.commit()
-        conn.close()
+        with db() as conn:
+            row = conn.execute("""
+                SELECT id FROM documents
+                WHERE status='NEW'
+                ORDER BY id ASC
+                LIMIT 1
+            """).fetchone()
+            if not row:
+                return None
+            doc_id = int(row["id"])
+            conn.execute("UPDATE documents SET status='PROCESSING', updated_at=? WHERE id=?", (now_iso(), doc_id))
+            conn.commit()
     return doc_id
+
+ALLOWED_DOC_COLUMNS = {"status", "extracted_md_path", "embedding_json", "suggestions_json",
+                        "suggested_folder_rel", "chosen_folder_rel", "moved_path", "error", "sha256"}
 
 def set_doc_fields(doc_id: int, **fields):
     keys = list(fields.keys())
     if not keys:
         return
+    for k in keys:
+        if k not in ALLOWED_DOC_COLUMNS:
+            raise ValueError(f"Invalid column name: {k}")
     cols = ", ".join([f"{k}=?" for k in keys] + ["updated_at=?"])
     vals = [fields[k] for k in keys] + [now_iso()]
     with DB_LOCK:
-        conn = db()
-        conn.execute(f"UPDATE documents SET {cols} WHERE id=?", (*vals, doc_id))
-        conn.commit()
-        conn.close()
+        with db() as conn:
+            conn.execute(f"UPDATE documents SET {cols} WHERE id=?", (*vals, doc_id))
+            conn.commit()
 
 def get_doc(doc_id: int) -> sqlite3.Row:
     with DB_LOCK:
-        conn = db()
-        row = conn.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
-        conn.close()
+        with db() as conn:
+            row = conn.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
     if not row:
         raise HTTPException(404, "doc not found")
     return row
@@ -874,6 +875,12 @@ INDEX_TMPL = r"""
 <div class="toast" id="toast"></div>
 
 <script>
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
 function toast(msg) {
   const t = document.getElementById('toast');
   t.textContent = msg;
@@ -897,7 +904,7 @@ async function refreshQueue() {
   const data = await res.json();
   const el = document.getElementById('queue');
   const statsEl = document.getElementById('stats');
-  
+
   statsEl.innerHTML = `
     <div class="stat"><span class="stat-dot ready"></span>${data.ready} Ready</div>
     <div class="stat"><span class="stat-dot processing"></span>${data.processing} Processing</div>
@@ -930,16 +937,16 @@ async function refreshQueue() {
 
     card.innerHTML = `
       <div class="card-header">
-        <div class="card-title" title="${d.name}">${d.name}</div>
-        <div class="tag ${getTagClass(d.status)}">${d.status}</div>
+        <div class="card-title" title="${escapeHtml(d.name)}">${escapeHtml(d.name)}</div>
+        <div class="tag ${getTagClass(d.status)}">${escapeHtml(d.status)}</div>
       </div>
       <div class="suggestion-box">
         <div class="suggestion-label">Suggested folder</div>
-        <div class="suggestion-value">${sugFolder} ${sugScore ? `<span class="suggestion-score">(${sugScore})</span>` : ''}</div>
+        <div class="suggestion-value">${escapeHtml(sugFolder)} ${sugScore ? `<span class="suggestion-score">(${escapeHtml(String(sugScore))})</span>` : ''}</div>
       </div>
       <div class="card-actions">
-        <a href="/doc/${d.id}">View Details</a>
-        ${d.status === 'ERROR' ? `<button class="btn btn-sm" onclick="retryDoc(${d.id})">Retry</button>` : ''}
+        <a href="/doc/${encodeURIComponent(d.id)}">View Details</a>
+        ${d.status === 'ERROR' ? `<button class="btn btn-sm" onclick="retryDoc(${parseInt(d.id)})">Retry</button>` : ''}
       </div>
     `;
 
@@ -1358,13 +1365,10 @@ def render_folder_tree_html(tree: Dict[str, Any]) -> str:
 # FastAPI app
 # =========================
 
-app = FastAPI(title="DocSort Review UI")
-
 STOP = threading.Event()
 
-@app.on_event("startup")
-def _startup():
-
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     init_db()
     reset_stuck_processing()
 
@@ -1374,9 +1378,11 @@ def _startup():
     threading.Thread(target=scanner_loop, args=(STOP,), daemon=True).start()
     threading.Thread(target=worker_loop, args=(STOP,), daemon=True).start()
 
-@app.on_event("shutdown")
-def _shutdown():
+    yield
+
     STOP.set()
+
+app = FastAPI(title="DocSort Review UI", lifespan=lifespan)
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -1418,23 +1424,22 @@ def doc_detail(doc_id: int):
 @app.get("/api/queue")
 def api_queue():
     with DB_LOCK:
-        conn = db()
-        rows = conn.execute("""
-            SELECT id, input_path, status, suggestions_json
-            FROM documents
-            ORDER BY input_path ASC
-            LIMIT 200
-        """).fetchall()
+        with db() as conn:
+            rows = conn.execute("""
+                SELECT id, input_path, status, suggestions_json
+                FROM documents
+                ORDER BY input_path ASC
+                LIMIT 200
+            """).fetchall()
 
-        counts = conn.execute("""
-            SELECT
-              SUM(CASE WHEN status='READY' THEN 1 ELSE 0 END) as ready,
-              SUM(CASE WHEN status='PROCESSING' THEN 1 ELSE 0 END) as processing,
-              SUM(CASE WHEN status='ERROR' THEN 1 ELSE 0 END) as error,
-              SUM(CASE WHEN status='MOVED' THEN 1 ELSE 0 END) as moved
-            FROM documents
-        """).fetchone()
-        conn.close()
+            counts = conn.execute("""
+                SELECT
+                  SUM(CASE WHEN status='READY' THEN 1 ELSE 0 END) as ready,
+                  SUM(CASE WHEN status='PROCESSING' THEN 1 ELSE 0 END) as processing,
+                  SUM(CASE WHEN status='ERROR' THEN 1 ELSE 0 END) as error,
+                  SUM(CASE WHEN status='MOVED' THEN 1 ELSE 0 END) as moved
+                FROM documents
+            """).fetchone()
 
     items = []
     for r in rows:
