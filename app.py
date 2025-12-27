@@ -11,7 +11,7 @@ from contextlib import contextmanager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -74,7 +74,7 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 @contextmanager
-def db() -> sqlite3.Connection:
+def db() -> Generator[sqlite3.Connection, None, None]:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     try:
